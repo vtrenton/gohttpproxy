@@ -6,18 +6,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
-
-// validatePort is a placeholder for the port validation logic
-func validatePort(host, port string) bool {
-	// In practice, add validation logic here
-	return true
-}
 
 func main() {
 	const lhost = "127.0.0.1"
@@ -146,4 +142,22 @@ func logResponse(logFile *os.File, resp *http.Response) {
 	// Write the log entry to file
 	logEntry += "\n"
 	_, _ = logFile.WriteString(logEntry)
+}
+
+// Validate the port before establishing it.
+func validatePort(host, port string) bool {
+	if len(host) == 0 || len(port) == 0 {
+		log.Fatal("Error empty value, set Host: %s Port: %s", host, port)
+	}
+	// If the tcp connect to the localhost
+	// we can assume the socket is in use
+	serverAddress := fmt.Sprintf("%s:%s", host, port)
+	conn, err := net.DialTimeout("tcp", serverAddress, 2*time.Second)
+	if err == nil {
+		log.Fatalf("Socket is in use!")
+		return false
+	}
+	_ = conn.Close()
+
+	return true
 }
