@@ -28,6 +28,10 @@ type LogEntry struct {
 	Body   string   `json:"body"`
 }
 
+type LogWrapper struct {
+	Logs []LogEntry `json:"logs"`
+}
+
 type NetInfo struct {
 	Source string `json:"source"`
 	Dst    string `json:"dst"`
@@ -257,25 +261,27 @@ func logResponseAsJSON(logFileName string, resp *http.Response) {
 	appendToJSON(logFileName, entry)
 }
 
-// appendToJSON appends the log entry to the JSON array
+// appendToJSON appends the log entry to the JSON array, ensuring {} wrapping
 func appendToJSON(logFileName string, entry LogEntry) {
-	var logEntries []LogEntry
+	var logWrapper LogWrapper
 
-	// Read existing JSON array from file
+	// Read existing JSON data from file
 	if fileInfo, err := os.Stat(logFileName); err == nil && fileInfo.Size() > 0 {
 		data, err := ioutil.ReadFile(logFileName)
 		if err != nil {
 			log.Fatal("Error reading JSON file:", err)
 		}
-		if err := json.Unmarshal(data, &logEntries); err != nil {
+		if err := json.Unmarshal(data, &logWrapper); err != nil {
 			log.Fatal("Error unmarshalling JSON file:", err)
 		}
+	} else {
+		logWrapper.Logs = []LogEntry{} // Initialize if file is empty or doesn't exist
 	}
 
 	// Append new log entry
-	logEntries = append(logEntries, entry)
+	logWrapper.Logs = append(logWrapper.Logs, entry)
 
-	// Write the updated array back to the file atomically
+	// Write the updated JSON object back to the file atomically
 	tmpFileName := logFileName + ".tmp"
 	tmpFile, err := os.Create(tmpFileName)
 	if err != nil {
@@ -285,7 +291,7 @@ func appendToJSON(logFileName string, entry LogEntry) {
 
 	encoder := json.NewEncoder(tmpFile)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(logEntries); err != nil {
+	if err := encoder.Encode(logWrapper); err != nil {
 		log.Fatal("Error writing JSON to file:", err)
 	}
 
