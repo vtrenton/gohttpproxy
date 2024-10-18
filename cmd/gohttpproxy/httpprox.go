@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -13,14 +14,18 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
+// Mutex for file writes to avoid concurrency issues
+var fileMutex sync.Mutex
+
 // JSON output schema
 type LogEntry struct {
-	Net    NetInfo     `json:"net"`
-	Header []string    `json:"header"`
-	Body   interface{} `json:"body"`
+	Net    NetInfo  `json:"net"`
+	Header []string `json:"header"`
+	Body   string   `json:"body"`
 }
 
 type NetInfo struct {
@@ -78,16 +83,12 @@ func main() {
 	}
 
 	// Create a log file (JSON or normal)
-	var logFile *os.File
+	var logFileName string
 	if outputAsJSON {
-		logFile, err = os.OpenFile("output.json", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+		logFileName = "output.json"
 	} else {
-		logFile, err = os.OpenFile("proxy.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+		logFileName = "proxy.log"
 	}
-	if err != nil {
-		log.Fatal("Failed to open log file:", err)
-	}
-	defer logFile.Close()
 
 	// Create the HTTP proxy
 	proxy := &httputil.ReverseProxy{
@@ -98,11 +99,14 @@ func main() {
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if outputAsJSON {
-				logResponseAsJSON(logFile, resp) // Log response in JSON
+				logResponseAsJSON(logFileName, resp) // Log response in JSON
 			} else {
-				logResponse(logFile, resp) // Log the response headers and body
+				logResponse(logFileName, resp) // Log the response headers and body
 			}
 			return nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			log.Printf("http: proxy error: %v\n", err)
 		},
 	}
 
@@ -116,9 +120,9 @@ func main() {
 
 		// Log the incoming request
 		if outputAsJSON {
-			logRequestAsJSON(logFile, r) // Log request in JSON
+			logRequestAsJSON(logFileName, r) // Log request in JSON
 		} else {
-			logRequest(logFile, r) // Log request in plain text
+			logRequest(logFileName, r) // Log request in plain text
 		}
 
 		// Serve the proxy request
@@ -134,7 +138,7 @@ func main() {
 }
 
 // logRequest logs the incoming request headers and body in plain text
-func logRequest(logFile *os.File, r *http.Request) {
+func logRequest(logFileName string, r *http.Request) {
 	logEntry := fmt.Sprintf("Incoming Request: %v %v %v\n", r.Method, r.URL, r.Proto)
 
 	// Log headers
@@ -153,11 +157,14 @@ func logRequest(logFile *os.File, r *http.Request) {
 
 	// Write the log entry to file
 	logEntry += "\n"
-	_, _ = logFile.WriteString(logEntry)
+	fileMutex.Lock()
+	defer fileMutex.Unlock()
+
+	appendToFile(logFileName, logEntry)
 }
 
 // logResponse logs the outgoing response headers and body in plain text
-func logResponse(logFile *os.File, resp *http.Response) {
+func logResponse(logFileName string, resp *http.Response) {
 	logEntry := fmt.Sprintf("Outgoing Response: %v\n", resp.Status)
 
 	// Log headers
@@ -176,22 +183,27 @@ func logResponse(logFile *os.File, resp *http.Response) {
 
 	// Write the log entry to file
 	logEntry += "\n"
-	_, _ = logFile.WriteString(logEntry)
+	fileMutex.Lock()
+	defer fileMutex.Unlock()
+
+	appendToFile(logFileName, logEntry)
 }
 
 // logRequestAsJSON logs the incoming request in JSON format
-func logRequestAsJSON(logFile *os.File, r *http.Request) {
+func logRequestAsJSON(logFileName string, r *http.Request) {
 	headers := []string{}
 	for name, values := range r.Header {
 		for _, value := range values {
-			headers = append(headers, fmt.Sprintf("%v: %v", name, value))
+			// Sanitize and ensure proper formatting
+			headerString := fmt.Sprintf("%v: %v", name, value)
+			headers = append(headers, headerString)
 		}
 	}
 
-	var body interface{}
+	var body string
 	if r.Body != nil {
 		bodyBytes, _ := io.ReadAll(r.Body)
-		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Reassign body for reuse
+		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 		body = string(bodyBytes)
 	}
 
@@ -204,45 +216,96 @@ func logRequestAsJSON(logFile *os.File, r *http.Request) {
 		Body:   body,
 	}
 
-	// Marshal entry to JSON
-	entryJSON, _ := json.MarshalIndent(entry, "", "  ")
+	// Append to JSON array with mutex
+	fileMutex.Lock()
+	defer fileMutex.Unlock()
 
-	// Write the log entry to file
-	_, _ = logFile.Write(entryJSON)
-	_, _ = logFile.WriteString("\n")
+	appendToJSON(logFileName, entry)
 }
 
 // logResponseAsJSON logs the outgoing response in JSON format
-func logResponseAsJSON(logFile *os.File, resp *http.Response) {
+func logResponseAsJSON(logFileName string, resp *http.Response) {
 	headers := []string{}
 	for name, values := range resp.Header {
 		for _, value := range values {
-			headers = append(headers, fmt.Sprintf("%v: %v", name, value))
+			// Sanitize and ensure proper formatting
+			headerString := fmt.Sprintf("%v: %v", name, value)
+			headers = append(headers, headerString)
 		}
 	}
 
-	var body interface{}
+	var body string
 	if resp.Body != nil {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Reassign body for reuse
+		resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 		body = string(bodyBytes)
 	}
 
 	entry := LogEntry{
 		Net: NetInfo{
-			Source: "proxy", // No source in response, set to proxy
+			Source: "proxy",
 			Dst:    resp.Request.Host,
 		},
 		Header: headers,
 		Body:   body,
 	}
 
-	// Marshal entry to JSON
-	entryJSON, _ := json.MarshalIndent(entry, "", "  ")
+	// Append to JSON array with mutex
+	fileMutex.Lock()
+	defer fileMutex.Unlock()
 
-	// Write the log entry to file
-	_, _ = logFile.Write(entryJSON)
-	_, _ = logFile.WriteString("\n")
+	appendToJSON(logFileName, entry)
+}
+
+// appendToJSON appends the log entry to the JSON array
+func appendToJSON(logFileName string, entry LogEntry) {
+	var logEntries []LogEntry
+
+	// Read existing JSON array from file
+	if fileInfo, err := os.Stat(logFileName); err == nil && fileInfo.Size() > 0 {
+		data, err := ioutil.ReadFile(logFileName)
+		if err != nil {
+			log.Fatal("Error reading JSON file:", err)
+		}
+		if err := json.Unmarshal(data, &logEntries); err != nil {
+			log.Fatal("Error unmarshalling JSON file:", err)
+		}
+	}
+
+	// Append new log entry
+	logEntries = append(logEntries, entry)
+
+	// Write the updated array back to the file atomically
+	tmpFileName := logFileName + ".tmp"
+	tmpFile, err := os.Create(tmpFileName)
+	if err != nil {
+		log.Fatal("Error creating temp file:", err)
+	}
+	defer tmpFile.Close()
+
+	encoder := json.NewEncoder(tmpFile)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(logEntries); err != nil {
+		log.Fatal("Error writing JSON to file:", err)
+	}
+
+	// Atomically replace the original file
+	if err := os.Rename(tmpFileName, logFileName); err != nil {
+		log.Fatal("Error replacing the JSON file:", err)
+	}
+}
+
+// appendToFile appends plain text to a log file
+func appendToFile(logFileName string, logEntry string) {
+	f, err := os.OpenFile(logFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatal("Error opening log file:", err)
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(logEntry); err != nil {
+		log.Fatal("Error writing to log file:", err)
+	}
 }
 
 // Validate the port before establishing it.
