@@ -1,1 +1,1 @@
-HTTP proxy in go
+HTTP proxy in go. Output in text or JSON for additional parsing.
